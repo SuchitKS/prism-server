@@ -3,20 +3,177 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AudioMesh Remote Portal</title>
+    <title>Prism — Remote View</title>
     <style>
-        body { background-color: #0f172a; color: white; font-family: sans-serif; text-align: center; }
-        video { width: 80%; max-width: 800px; background: #1e293b; border-radius: 16px; margin-top: 20px; }
-        .header { padding: 20px; font-size: 24px; font-weight: bold; color: #38bdf8; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: #0f172a;
+            color: #e2e8f0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 24px 16px;
+        }
+        .header {
+            font-size: 22px;
+            font-weight: 600;
+            color: #38bdf8;
+            margin-bottom: 8px;
+            letter-spacing: -0.3px;
+        }
+        .subtitle {
+            font-size: 14px;
+            color: #94a3b8;
+            margin-bottom: 24px;
+        }
+        #status {
+            font-size: 14px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            background: #1e293b;
+            color: #94a3b8;
+            margin-bottom: 20px;
+            transition: all 0.3s;
+        }
+        #status.connected { background: #052e16; color: #4ade80; }
+        #status.waiting   { background: #1e3a5f; color: #7dd3fc; }
+        video {
+            width: 100%;
+            max-width: 900px;
+            background: #1e293b;
+            border-radius: 16px;
+            border: 1px solid #334155;
+        }
+        .room-bar {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            width: 100%;
+            max-width: 900px;
+        }
+        .room-bar input {
+            flex: 1;
+            padding: 10px 14px;
+            border-radius: 10px;
+            border: 1px solid #334155;
+            background: #1e293b;
+            color: #e2e8f0;
+            font-size: 14px;
+        }
+        .room-bar button {
+            padding: 10px 20px;
+            border-radius: 10px;
+            border: none;
+            background: #0ea5e9;
+            color: white;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+        }
+        .room-bar button:hover { background: #0284c7; }
     </style>
 </head>
 <body>
-    <div class="header">AudioMesh Remote Portal</div>
-    <p>Waiting for Primary Device to connect via WebRTC...</p>
-    
+    <div class="header">Prism — Remote View</div>
+    <p class="subtitle">Samsung Research · Decentralized Call Aggregation</p>
+
+    <div class="room-bar">
+        <input id="roomInput" type="text" placeholder="Room ID (e.g. prism-room)" value="prism-room"/>
+        <button onclick="joinRoom()">Join</button>
+    </div>
+
+    <div id="status">Not connected</div>
     <video id="remoteVideo" autoplay playsinline controls></video>
 
     <script src="/socket.io/socket.io.js"></script>
-    <script src="client.js"></script>
+    <script>
+        const socket = io();
+        const remoteVideo = document.getElementById('remoteVideo');
+        const statusEl = document.getElementById('status');
+
+        const config = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        let pc;
+        let currentRoom = null;
+
+        function setStatus(msg, cls) {
+            statusEl.textContent = msg;
+            statusEl.className = cls || '';
+        }
+
+        function joinRoom() {
+            const room = document.getElementById('roomInput').value.trim() || 'prism-room';
+            currentRoom = room;
+            socket.emit('join', room);
+            setStatus('Waiting for host to connect...', 'waiting');
+        }
+
+        // Auto-join on load with default room
+        socket.on('connect', () => {
+            joinRoom();
+        });
+
+        socket.on('peer-joined', () => {
+            setStatus('Host device detected — waiting for offer...', 'waiting');
+        });
+
+        socket.on('message', async (msg) => {
+            if (!pc) createPeerConnection();
+
+            try {
+                if (msg.offer) {
+                    setStatus('Received offer — connecting...', 'waiting');
+                    await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+                    socket.emit('message', {
+                        roomId: currentRoom,
+                        answer: pc.localDescription
+                    });
+                } else if (msg.iceCandidate) {
+                    await pc.addIceCandidate(new RTCIceCandidate(msg.iceCandidate));
+                } else if (msg.answer) {
+                    // We sent the offer (shouldn't happen in browser, but safe to handle)
+                    await pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
+                }
+            } catch (e) {
+                console.error('WebRTC error:', e);
+                setStatus('Connection error: ' + e.message);
+            }
+        });
+
+        function createPeerConnection() {
+            pc = new RTCPeerConnection(config);
+
+            pc.onicecandidate = (e) => {
+                if (e.candidate) {
+                    socket.emit('message', {
+                        roomId: currentRoom,
+                        iceCandidate: e.candidate
+                    });
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                const s = pc.connectionState;
+                if (s === 'connected') setStatus('Live — streaming from host', 'connected');
+                else if (s === 'disconnected' || s === 'failed') setStatus('Connection lost — refresh to retry');
+            };
+
+            pc.ontrack = (e) => {
+                if (remoteVideo.srcObject !== e.streams[0]) {
+                    remoteVideo.srcObject = e.streams[0];
+                    setStatus('Live — streaming from host', 'connected');
+                }
+            };
+        }
+    </script>
 </body>
 </html>
