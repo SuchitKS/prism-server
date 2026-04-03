@@ -6,58 +6,22 @@
     <title>Prism — Remote View</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            background: #0f172a;
-            color: #e2e8f0;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            min-height: 100vh;
-            padding: 24px 16px;
-        }
+        body { background: #0f172a; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 24px 16px; }
         .header { font-size: 22px; font-weight: 600; color: #38bdf8; margin-bottom: 6px; }
         .subtitle { font-size: 14px; color: #94a3b8; margin-bottom: 20px; }
-        #status {
-            font-size: 14px; padding: 8px 16px; border-radius: 20px;
-            background: #1e293b; color: #94a3b8; margin-bottom: 16px; transition: all 0.3s;
-        }
+        #status { font-size: 14px; padding: 8px 18px; border-radius: 20px; background: #1e293b; color: #94a3b8; margin-bottom: 16px; transition: all 0.3s; }
         #status.connected { background: #052e16; color: #4ade80; }
-        #status.waiting   { background: #1e3a5f; color: #7dd3fc; }
-        #status.error     { background: #450a0a; color: #fca5a5; }
-
-        .room-bar {
-            display: flex; gap: 10px; margin-bottom: 16px;
-            width: 100%; max-width: 900px;
-        }
-        .room-bar input {
-            flex: 1; padding: 10px 14px; border-radius: 10px;
-            border: 1px solid #334155; background: #1e293b; color: #e2e8f0; font-size: 14px;
-        }
-        .room-bar button {
-            padding: 10px 20px; border-radius: 10px; border: none;
-            background: #0ea5e9; color: white; font-size: 14px; font-weight: 500; cursor: pointer;
-        }
-        .room-bar button:hover { background: #0284c7; }
-
+        #status.waiting { background: #1e3a5f; color: #7dd3fc; }
+        #status.error { background: #450a0a; color: #fca5a5; }
+        .room-bar { display: flex; gap: 10px; margin-bottom: 16px; width: 100%; max-width: 900px; }
+        .room-bar input { flex: 1; padding: 10px 14px; border-radius: 10px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; font-size: 14px; }
+        .room-bar button { padding: 10px 20px; border-radius: 10px; border: none; background: #0ea5e9; color: white; font-size: 14px; font-weight: 500; cursor: pointer; }
         video { width: 100%; max-width: 900px; background: #1e293b; border-radius: 16px; border: 1px solid #334155; }
-
-        /* Mic controls */
-        .mic-bar {
-            display: flex; align-items: center; gap: 14px; margin-top: 16px;
-            padding: 12px 20px; background: #1e293b; border-radius: 14px;
-            border: 1px solid #334155; width: 100%; max-width: 900px;
-        }
-        .mic-btn {
-            padding: 10px 22px; border-radius: 10px; border: none; cursor: pointer;
-            font-size: 14px; font-weight: 500; transition: background 0.2s;
-        }
-        .mic-btn.off  { background: #334155; color: #94a3b8; }
-        .mic-btn.on   { background: #16a34a; color: white; }
-        .mic-btn.mute { background: #dc2626; color: white; }
+        .mic-bar { display: flex; align-items: center; gap: 14px; margin-top: 16px; padding: 12px 20px; background: #1e293b; border-radius: 14px; border: 1px solid #334155; width: 100%; max-width: 900px; }
+        .mic-btn { padding: 10px 22px; border-radius: 10px; border: none; cursor: pointer; font-size: 14px; font-weight: 500; transition: background 0.2s; }
+        .mic-btn.off { background: #334155; color: #94a3b8; }
+        .mic-btn.on { background: #16a34a; color: white; }
         #mic-status { font-size: 13px; color: #94a3b8; }
-
-        /* Volume indicator */
         .vol-wrap { display: flex; align-items: center; gap: 8px; margin-left: auto; }
         .vol-bar { width: 80px; height: 8px; background: #334155; border-radius: 4px; overflow: hidden; }
         #vol-fill { height: 100%; width: 0%; background: #22c55e; border-radius: 4px; transition: width 0.1s; }
@@ -67,19 +31,19 @@
 <body>
     <div class="header">Prism — Remote View</div>
     <p class="subtitle">Samsung Research · Decentralized Call Aggregation</p>
-
     <div class="room-bar">
         <input id="roomInput" type="text" placeholder="Room ID" value="prism-room"/>
         <button onclick="joinRoom()">Join</button>
     </div>
-
     <div id="status">Not connected</div>
+
+    <!-- Main video — receives host video AND host audio together -->
     <video id="remoteVideo" autoplay playsinline controls></video>
 
-    <!-- Mic controls — shown after connection -->
+    <!-- Mic controls — appear after WebRTC connects -->
     <div class="mic-bar" id="micBar" style="display:none">
         <button class="mic-btn off" id="micBtn" onclick="toggleMic()">🎤 Enable Mic</button>
-        <span id="mic-status">Your microphone is off — host cannot hear you</span>
+        <span id="mic-status">Your mic is off — host cannot hear you</span>
         <div class="vol-wrap">
             <span class="vol-label">Level</span>
             <div class="vol-bar"><div id="vol-fill"></div></div>
@@ -89,12 +53,12 @@
     <script src="/socket.io/socket.io.js"></script>
     <script>
     const socket = io();
-    const remoteVideo = document.getElementById('remoteVideo');
-    const statusEl    = document.getElementById('status');
-    const micBar      = document.getElementById('micBar');
-    const micBtn      = document.getElementById('micBtn');
-    const micStatus   = document.getElementById('mic-status');
-    const volFill     = document.getElementById('vol-fill');
+    const remoteVideo  = document.getElementById('remoteVideo');
+    const statusEl     = document.getElementById('status');
+    const micBar       = document.getElementById('micBar');
+    const micBtn       = document.getElementById('micBtn');
+    const micStatusEl  = document.getElementById('mic-status');
+    const volFill      = document.getElementById('vol-fill');
 
     const config = {
         iceServers: [
@@ -103,19 +67,19 @@
         ]
     };
 
-    let pc = null;
+    let pc          = null;
     let currentRoom = null;
-    let localStream = null;       // mic stream
-    let micSender = null;         // RTCRtpSender for our audio track
-    let micEnabled = false;
-    let analyser = null;
-    let volTimer = null;
+    let localStream = null;
+    let micSender   = null;
+    let micEnabled  = false;
+    let volTimer    = null;
 
     function setStatus(msg, cls) {
         statusEl.textContent = msg;
-        statusEl.className = cls || '';
+        statusEl.className   = cls || '';
     }
 
+    // ── Room join ──────────────────────────────────────────────────────
     function joinRoom() {
         const room = document.getElementById('roomInput').value.trim() || 'prism-room';
         currentRoom = room;
@@ -123,34 +87,39 @@
         setStatus('Waiting for host to connect...', 'waiting');
     }
 
-    socket.on('connect', () => { joinRoom(); });
+    socket.on('connect',     () => { joinRoom(); });
+    socket.on('peer-joined', () => { setStatus('Host detected — waiting for offer...', 'waiting'); });
 
-    socket.on('peer-joined', () => {
-        setStatus('Host device detected — waiting for offer...', 'waiting');
-    });
-
+    // ── Signaling ──────────────────────────────────────────────────────
     socket.on('message', async (msg) => {
         if (!pc) createPeerConnection();
         try {
             if (msg.offer) {
-                setStatus('Received offer — connecting...', 'waiting');
+                setStatus('Offer received — connecting...', 'waiting');
                 await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
+
+                // Add our mic track BEFORE creating the answer so the SDP
+                // includes an audio send channel from the browser to the host.
+                // This is what was missing — without addTrack here, the browser
+                // never sends audio back even if OfferToReceiveAudio is true.
+                await ensureMicSenderReady();
+
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
                 socket.emit('message', { roomId: currentRoom, answer: pc.localDescription });
 
             } else if (msg.iceCandidate) {
                 await pc.addIceCandidate(new RTCIceCandidate(msg.iceCandidate));
-
             } else if (msg.answer) {
                 await pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
             }
         } catch (e) {
             console.error('WebRTC error:', e);
-            setStatus('Connection error: ' + e.message, 'error');
+            setStatus('Error: ' + e.message, 'error');
         }
     });
 
+    // ── PeerConnection ─────────────────────────────────────────────────
     function createPeerConnection() {
         pc = new RTCPeerConnection(config);
 
@@ -164,7 +133,6 @@
             const s = pc.connectionState;
             if (s === 'connected') {
                 setStatus('Live — streaming from host', 'connected');
-                // Show mic controls once connected
                 micBar.style.display = 'flex';
             } else if (s === 'disconnected' || s === 'failed') {
                 setStatus('Connection lost — refresh to retry', 'error');
@@ -173,32 +141,38 @@
         };
 
         // Receive host video + audio
+        // The host sends ONE stream containing both the video track and the
+        // mixed audio track. We assign the whole stream to the <video> element
+        // so the browser plays both video and audio automatically.
         pc.ontrack = (e) => {
-            if (e.track.kind === 'video') {
+            console.log('Track received:', e.track.kind, e.track.id);
+            if (e.streams && e.streams[0]) {
                 if (remoteVideo.srcObject !== e.streams[0]) {
                     remoteVideo.srcObject = e.streams[0];
+                    // Ensure audio is not muted
+                    remoteVideo.muted = false;
+                    remoteVideo.volume = 1.0;
                 }
             }
-            // Audio from host plays automatically via the stream
         };
-
-        // Add a silent audio track immediately so the host knows
-        // we have an audio channel — it will be replaced when mic is enabled
-        addSilentAudioTrack();
     }
 
-    // Add a silent (null) audio track so WebRTC negotiation includes audio
-    // in both directions from the start. We replace it when mic is enabled.
-    async function addSilentAudioTrack() {
+    // ── Mic setup ──────────────────────────────────────────────────────
+    // Called before createAnswer so SDP includes our audio send channel.
+    // Uses a silent track initially; replaced with real mic when user clicks.
+    async function ensureMicSenderReady() {
+        if (micSender) return; // already added
         try {
-            // Create a silent oscillator track
+            // Create a silent audio track from a Web Audio oscillator
             const ctx = new AudioContext();
             const dst = ctx.createMediaStreamDestination();
+            // Connect nothing — destination gets silence
             const silentTrack = dst.stream.getAudioTracks()[0];
-            silentTrack.enabled = false;
+            silentTrack.enabled = true;
             micSender = pc.addTrack(silentTrack, dst.stream);
-        } catch(e) {
-            console.warn('Silent track init failed:', e);
+            console.log('Silent mic track added to PeerConnection');
+        } catch (e) {
+            console.warn('Could not add silent track:', e);
         }
     }
 
@@ -213,67 +187,58 @@
     async function enableMic() {
         try {
             localStream = await navigator.mediaDevices.getUserMedia({
-                audio: {
-                    echoCancellation: true,
-                    noiseSuppression: true,
-                    autoGainControl: true
-                },
+                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
                 video: false
             });
-
             const micTrack = localStream.getAudioTracks()[0];
 
-            // Replace the silent track with the real mic track
             if (micSender) {
+                // Hot-swap: replace silent track with real mic — no renegotiation needed
                 await micSender.replaceTrack(micTrack);
             } else {
                 micSender = pc.addTrack(micTrack, localStream);
             }
 
             micEnabled = true;
-            micBtn.textContent = '🔴 Mute Mic';
-            micBtn.className = 'mic-btn on';
-            micStatus.textContent = 'Microphone ON — host can hear you';
-
-            startVolumeMonitor(micTrack);
-
+            micBtn.textContent  = '🔴 Mute Mic';
+            micBtn.className    = 'mic-btn on';
+            micStatusEl.textContent = 'Mic ON — host and P2P clients can hear you';
+            startVolMonitor(micTrack);
         } catch (e) {
             console.error('Mic error:', e);
-            micStatus.textContent = 'Mic permission denied: ' + e.message;
-            micBtn.className = 'mic-btn off';
+            micStatusEl.textContent = 'Mic permission denied: ' + e.message;
         }
     }
 
     function disableMic() {
         localStream?.getTracks().forEach(t => t.stop());
-        localStream = null;
-        micEnabled = false;
-        micBtn.textContent = '🎤 Enable Mic';
-        micBtn.className = 'mic-btn off';
-        micStatus.textContent = 'Your microphone is off — host cannot hear you';
-        stopVolumeMonitor();
+        localStream  = null;
+        micEnabled   = false;
+        micBtn.textContent  = '🎤 Enable Mic';
+        micBtn.className    = 'mic-btn off';
+        micStatusEl.textContent = 'Mic off';
+        stopVolMonitor();
     }
 
-    function startVolumeMonitor(track) {
+    function startVolMonitor(track) {
         try {
-            const ctx   = new AudioContext();
-            const src   = ctx.createMediaStreamSource(new MediaStream([track]));
-            analyser    = ctx.createAnalyser();
+            const ctx      = new AudioContext();
+            const src      = ctx.createMediaStreamSource(new MediaStream([track]));
+            const analyser = ctx.createAnalyser();
             analyser.fftSize = 256;
             src.connect(analyser);
-            const data  = new Uint8Array(analyser.frequencyBinCount);
+            const data = new Uint8Array(analyser.frequencyBinCount);
             volTimer = setInterval(() => {
                 analyser.getByteFrequencyData(data);
                 const avg = data.reduce((a, b) => a + b, 0) / data.length;
                 volFill.style.width = Math.min(100, avg * 2) + '%';
             }, 100);
-        } catch (e) { console.warn('Volume monitor error:', e); }
+        } catch (e) { console.warn('Vol monitor error:', e); }
     }
 
-    function stopVolumeMonitor() {
+    function stopVolMonitor() {
         clearInterval(volTimer);
         volFill.style.width = '0%';
-        analyser = null;
     }
     </script>
 </body>
