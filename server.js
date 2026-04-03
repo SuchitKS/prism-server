@@ -1,18 +1,10 @@
 const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
-const io = require('socket.io')(http, {
-    cors: { origin: "*" }
-});
+const io = require('socket.io')(http, { cors: { origin: "*" } });
 
 app.use(express.static('public'));
 
-/**
- * Room-based signaling — bidirectional.
- * Android host and browser both join 'prism-room'.
- * Any message one sends is relayed to all OTHER sockets in the room.
- * This already supports two-way offer/answer/ICE exchange.
- */
 io.on('connection', (socket) => {
     console.log('Device connected:', socket.id);
 
@@ -37,6 +29,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-http.listen(PORT, () => {
-    console.log(`Signaling server running on port ${PORT}`);
-});
+http.listen(PORT, () => console.log(`Server on port ${PORT}`));
