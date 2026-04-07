@@ -21,6 +21,8 @@
         #status.connected { background: #052e16; color: #4ade80; }
         #status.waiting   { background: #1e3a5f; color: #7dd3fc; }
         #status.error     { background: #450a0a; color: #fca5a5; }
+
+        /* Room bar — shown only before joining */
         .room-bar { display: flex; gap: 10px; margin-bottom: 14px; width: 100%; max-width: 900px; }
         .room-bar input {
             flex: 1; padding: 9px 14px; border-radius: 10px;
@@ -30,14 +32,15 @@
             padding: 9px 18px; border-radius: 10px; border: none;
             background: #0ea5e9; color: white; font-size: 14px; font-weight: 500; cursor: pointer;
         }
+        .room-bar button:hover { background: #0284c7; }
 
         /* Video grid */
         .video-grid { width: 100%; max-width: 900px; position: relative; margin-bottom: 12px; }
         #remoteVideo {
             width: 100%; border-radius: 14px;
             background: #1e293b; border: 1px solid #334155; display: block;
+            /* Critical: allow autoplay without user gesture */
         }
-        /* Self camera preview — picture-in-picture over the host video */
         #selfVideo {
             position: absolute; bottom: 12px; right: 12px;
             width: 130px; height: 98px;
@@ -78,23 +81,41 @@
         .vol-bar { width: 70px; height: 6px; background: #334155; border-radius: 3px; overflow: hidden; }
         #vol-fill { height: 100%; width: 0%; background: #22c55e; border-radius: 3px; transition: width 0.08s; }
         .vol-label { font-size: 11px; color: #64748b; }
+
+        /* Tap-to-play overlay — shown only if autoplay is blocked */
+        #playOverlay {
+            display: none;
+            position: absolute; inset: 0;
+            background: rgba(15,23,42,0.75);
+            border-radius: 14px;
+            align-items: center; justify-content: center;
+            cursor: pointer;
+        }
+        #playOverlay span {
+            background: #0ea5e9; color: white;
+            padding: 14px 28px; border-radius: 12px;
+            font-size: 16px; font-weight: 600;
+        }
     </style>
 </head>
 <body>
     <div class="header">Prism — Remote View</div>
     <p class="subtitle">Samsung Research · Decentralized Call Aggregation</p>
 
-    <div class="room-bar">
-        <input id="roomInput" type="text" placeholder="Room ID" value="prism-room"/>
+    <div class="room-bar" id="roomBar">
+        <input id="roomInput" type="text" placeholder="Enter Room ID" value="prism"/>
         <button onclick="joinRoom()">Join</button>
     </div>
 
-    <div id="status">Not connected</div>
+    <div id="status">Enter Room ID and click Join</div>
 
     <div class="video-grid">
-        <video id="remoteVideo" autoplay playsinline controls></video>
+        <video id="remoteVideo" autoplay playsinline muted></video>
         <div id="selfLabel">YOU</div>
         <video id="selfVideo" autoplay playsinline muted></video>
+        <div id="playOverlay" onclick="forcePlay()">
+            <span>▶ Tap to play</span>
+        </div>
     </div>
 
     <div class="controls" id="controls">
@@ -112,7 +133,7 @@
 
     <script src="/socket.io/socket.io.js"></script>
     <script>
-    const socket      = io();
+    const socket      = io({ autoConnect: false }); // don't connect until Join is clicked
     const remoteVideo = document.getElementById('remoteVideo');
     const selfVideo   = document.getElementById('selfVideo');
     const selfLabel   = document.getElementById('selfLabel');
@@ -123,6 +144,8 @@
     const camBtn      = document.getElementById('camBtn');
     const micStatusEl = document.getElementById('mic-status');
     const volFill     = document.getElementById('vol-fill');
+    const roomBar     = document.getElementById('roomBar');
+    const playOverlay = document.getElementById('playOverlay');
 
     const rtcConfig = {
         iceServers: [
@@ -135,11 +158,12 @@
     let currentRoom = null;
     let micStream   = null;
     let camStream   = null;
-    let micSender   = null; // RTCRtpSender for audio
-    let camSender   = null; // RTCRtpSender for video
+    let micSender   = null;
+    let camSender   = null;
     let micOn       = false;
     let camOn       = false;
     let volTimer    = null;
+    let hasJoined   = false;
 
     function setStatus(msg, cls) {
         statusEl.textContent = msg;
@@ -154,36 +178,55 @@
                                                : 'Mic and camera are off';
     }
 
-    // ── Room ───────────────────────────────────────────────────────────
+    // ── Join ───────────────────────────────────────────────────────────────
     function joinRoom() {
-        const room = document.getElementById('roomInput').value.trim() || 'prism-room';
+        const room = document.getElementById('roomInput').value.trim();
+        if (!room) { setStatus('Please enter a Room ID', 'error'); return; }
         currentRoom = room;
-        socket.emit('join', room);
-        setStatus('Waiting for host to connect...', 'waiting');
+        hasJoined   = true;
+        roomBar.style.display = 'none';  // hide room bar after joining
+        setStatus('Connecting to server...', 'waiting');
+        socket.connect();
     }
-    socket.on('connect',     () => { joinRoom(); });
-    socket.on('peer-joined', () => { setStatus('Host detected — waiting for offer...', 'waiting'); });
 
-    // ── Signaling ──────────────────────────────────────────────────────
+    socket.on('connect', () => {
+        console.log('Socket connected');
+        socket.emit('join', currentRoom);
+        setStatus('Waiting for host...', 'waiting');
+    });
+
+    socket.on('disconnect', () => {
+        console.log('Socket disconnected');
+        if (hasJoined) {
+            setStatus('Reconnecting...', 'waiting');
+            // PeerConnection will be rebuilt on next offer from host
+            cleanupPeerConnection();
+        }
+    });
+
+    socket.on('peer-joined', () => {
+        setStatus('Host detected — waiting for stream...', 'waiting');
+    });
+
+    // ── Signaling ──────────────────────────────────────────────────────────
     socket.on('message', async (msg) => {
-        if (!pc) createPeerConnection();
         try {
             if (msg.offer) {
+                // Always create a fresh PeerConnection for each new offer
+                // This handles browser refresh AND host-side restart cleanly
+                cleanupPeerConnection();
+                createPeerConnection();
+
                 setStatus('Connecting...', 'waiting');
                 await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
-
-                // Add placeholder tracks before answer so SDP includes
-                // send channels in both directions from negotiation start.
-                // User replaces them with real mic/cam via toggleMic/toggleCam.
                 await addPlaceholderTracks();
-
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
                 socket.emit('message', { roomId: currentRoom, answer: pc.localDescription });
 
-            } else if (msg.iceCandidate) {
+            } else if (msg.iceCandidate && pc) {
                 await pc.addIceCandidate(new RTCIceCandidate(msg.iceCandidate));
-            } else if (msg.answer) {
+            } else if (msg.answer && pc) {
                 await pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
             }
         } catch (e) {
@@ -192,7 +235,7 @@
         }
     });
 
-    // ── PeerConnection ─────────────────────────────────────────────────
+    // ── PeerConnection ─────────────────────────────────────────────────────
     function createPeerConnection() {
         pc = new RTCPeerConnection(rtcConfig);
 
@@ -203,12 +246,16 @@
 
         pc.onconnectionstatechange = () => {
             const s = pc.connectionState;
+            console.log('PC state:', s);
             if (s === 'connected') {
                 setStatus('Live — streaming from host', 'connected');
                 controls.style.display  = 'flex';
                 statusBar.style.display = 'flex';
+                // Unmute video now that we are connected and stream is flowing
+                remoteVideo.muted  = false;
+                remoteVideo.volume = 1.0;
             } else if (s === 'disconnected' || s === 'failed') {
-                setStatus('Connection lost — refresh to retry', 'error');
+                setStatus('Host disconnected — waiting for reconnect...', 'waiting');
                 controls.style.display  = 'none';
                 statusBar.style.display = 'none';
             }
@@ -218,19 +265,36 @@
         pc.ontrack = (e) => {
             console.log('Track from host:', e.track.kind);
             if (e.streams && e.streams[0]) {
-                if (remoteVideo.srcObject !== e.streams[0]) {
-                    remoteVideo.srcObject = e.streams[0];
-                    remoteVideo.muted  = false;
-                    remoteVideo.volume = 1.0;
-                }
+                remoteVideo.srcObject = e.streams[0];
+                // Attempt autoplay; show tap overlay only if blocked
+                remoteVideo.play().then(() => {
+                    playOverlay.style.display = 'none';
+                }).catch(() => {
+                    // Autoplay blocked — show tap overlay
+                    playOverlay.style.display = 'flex';
+                });
             }
         };
     }
 
+    function cleanupPeerConnection() {
+        if (!pc) return;
+        try { pc.close(); } catch(e) {}
+        pc = null;
+        micSender = null;
+        camSender = null;
+    }
+
+    function forcePlay() {
+        remoteVideo.muted = false;
+        remoteVideo.play().then(() => {
+            playOverlay.style.display = 'none';
+        }).catch(e => console.warn('Play failed:', e));
+    }
+
     // Add silent audio + black video placeholders before createAnswer.
-    // This ensures the SDP answer contains sendrecv for both tracks.
     async function addPlaceholderTracks() {
-        // ── Silent audio ──────────────────────────────────────────────
+        if (!pc) return;
         if (!micSender) {
             try {
                 const ctx  = new AudioContext();
@@ -238,11 +302,8 @@
                 const sTrack = dst.stream.getAudioTracks()[0];
                 sTrack.enabled = true;
                 micSender = pc.addTrack(sTrack, dst.stream);
-                console.log('Silent audio placeholder added');
             } catch (e) { console.warn('Silent audio failed:', e); }
         }
-
-        // ── Black video ───────────────────────────────────────────────
         if (!camSender) {
             try {
                 const canvas = document.createElement('canvas');
@@ -251,12 +312,11 @@
                 const bStream = canvas.captureStream(1);
                 const bTrack  = bStream.getVideoTracks()[0];
                 camSender = pc.addTrack(bTrack, bStream);
-                console.log('Black video placeholder added');
             } catch (e) { console.warn('Black video failed:', e); }
         }
     }
 
-    // ── Mic toggle ─────────────────────────────────────────────────────
+    // ── Mic toggle ─────────────────────────────────────────────────────────
     async function toggleMic() {
         if (!micOn) {
             try {
@@ -267,7 +327,7 @@
                 const micTrack = micStream.getAudioTracks()[0];
                 if (micSender) {
                     await micSender.replaceTrack(micTrack);
-                } else {
+                } else if (pc) {
                     micSender = pc.addTrack(micTrack, micStream);
                 }
                 micOn = true;
@@ -289,7 +349,7 @@
         updateStatusBar();
     }
 
-    // ── Camera toggle ──────────────────────────────────────────────────
+    // ── Camera toggle ──────────────────────────────────────────────────────
     async function toggleCam() {
         if (!camOn) {
             try {
@@ -298,23 +358,17 @@
                     audio: false
                 });
                 const camTrack = camStream.getVideoTracks()[0];
-
-                // Show self-preview in PiP
                 selfVideo.srcObject = camStream;
                 selfVideo.style.display = 'block';
                 selfLabel.style.display = 'block';
-
                 if (camSender) {
-                    // Hot-swap black placeholder with real camera — no renegotiation
                     await camSender.replaceTrack(camTrack);
-                } else {
+                } else if (pc) {
                     camSender = pc.addTrack(camTrack, camStream);
                 }
-
                 camOn = true;
                 camBtn.textContent = '🟦 Camera On';
                 camBtn.className   = 'ctrl-btn cam-on';
-
             } catch (e) {
                 console.error('Camera error:', e);
                 micStatusEl.textContent = 'Camera permission denied: ' + e.message;
@@ -328,8 +382,6 @@
             camOn = false;
             camBtn.textContent = '📷 Camera Off';
             camBtn.className   = 'ctrl-btn off';
-
-            // Replace with black track so stream stays alive (no renegotiation)
             try {
                 const canvas = document.createElement('canvas');
                 canvas.width = 2; canvas.height = 2;
@@ -341,7 +393,7 @@
         updateStatusBar();
     }
 
-    // ── Volume monitor ─────────────────────────────────────────────────
+    // ── Volume monitor ─────────────────────────────────────────────────────
     function startVolMonitor(track) {
         try {
             const ctx  = new AudioContext();
