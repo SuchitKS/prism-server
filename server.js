@@ -6,7 +6,7 @@ const io = require('socket.io')(http, { cors: { origin: "*" } });
 app.use(express.static('public'));
 
 io.on('connection', (socket) => {
-    console.log('Device connected:', socket.id);
+    console.log(`Device connected: ${socket.id}`);
 
     socket.on('join', (roomId) => {
         socket.join(roomId);
@@ -24,7 +24,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
-        console.log('Device disconnected:', socket.id);
+        console.log(`Device disconnected: ${socket.id}`);
     });
 });
 
