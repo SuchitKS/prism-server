@@ -213,13 +213,19 @@
         try {
             if (msg.offer) {
                 // Always create a fresh PeerConnection for each new offer
-                // This handles browser refresh AND host-side restart cleanly
+                // This handles browser refresh AND host-side restart / Bully
+                // failover re-election cleanly.
                 cleanupPeerConnection();
                 createPeerConnection();
 
                 setStatus('Connecting...', 'waiting');
                 await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
-                await addPlaceholderTracks();
+                // Re-attach the user's REAL mic/camera tracks if they were already
+                // on before this renegotiation (e.g. a new host was just elected).
+                // Falls back to silent/black placeholders only for whichever is
+                // genuinely off — this removes the old need to manually toggle
+                // mic/cam after a host failover for the track to reappear.
+                await restoreOrPlaceholderTracks();
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
                 socket.emit('message', { roomId: currentRoom, answer: pc.localDescription });
@@ -292,9 +298,39 @@
         }).catch(e => console.warn('Play failed:', e));
     }
 
-    // Add silent audio + black video placeholders before createAnswer.
-    async function addPlaceholderTracks() {
+    // Called once per fresh PeerConnection, right before createAnswer().
+    //
+    // WHY THIS EXISTS: every new offer (browser refresh, host restart, OR a new
+    // Primary being elected via the Android app's Bully failover) tears down the
+    // old PeerConnection and builds a new one. That new connection starts with NO
+    // senders at all — even if the user's mic/camera were already turned on a
+    // moment ago and are still actively capturing in the background. Previously
+    // this function only ever added silent/black placeholder tracks, so after a
+    // host failover the remote party's real audio/video would silently stop
+    // reaching the app until the user manually toggled the mic/cam button off
+    // and on again (which force-re-adds the real track).
+    //
+    // Fix: check whether mic/cam were already on and their tracks are still
+    // live BEFORE adding a placeholder. If so, re-attach the real track to the
+    // new connection immediately. Only fall back to a placeholder for whichever
+    // one is genuinely off, or whose track has actually ended.
+    async function restoreOrPlaceholderTracks() {
         if (!pc) return;
+
+        // ── Mic ──────────────────────────────────────────────────────────────
+        const liveMicTrack = micStream?.getAudioTracks?.()[0];
+        if (micOn && liveMicTrack && liveMicTrack.readyState === 'live') {
+            try {
+                micSender = pc.addTrack(liveMicTrack, micStream);
+            } catch (e) {
+                console.warn('Could not restore live mic track, falling back to silent placeholder:', e);
+                micOn = false; // reflect reality — see UI sync below
+            }
+        } else if (micOn) {
+            // Mic was marked "on" but the track is gone/ended (e.g. permission
+            // revoked, device asleep) — don't pretend it's still live.
+            micOn = false;
+        }
         if (!micSender) {
             try {
                 const ctx  = new AudioContext();
@@ -302,7 +338,20 @@
                 const sTrack = dst.stream.getAudioTracks()[0];
                 sTrack.enabled = true;
                 micSender = pc.addTrack(sTrack, dst.stream);
-            } catch (e) { console.warn('Silent audio failed:', e); }
+            } catch (e) { console.warn('Silent audio placeholder failed:', e); }
+        }
+
+        // ── Camera ───────────────────────────────────────────────────────────
+        const liveCamTrack = camStream?.getVideoTracks?.()[0];
+        if (camOn && liveCamTrack && liveCamTrack.readyState === 'live') {
+            try {
+                camSender = pc.addTrack(liveCamTrack, camStream);
+            } catch (e) {
+                console.warn('Could not restore live camera track, falling back to black placeholder:', e);
+                camOn = false;
+            }
+        } else if (camOn) {
+            camOn = false;
         }
         if (!camSender) {
             try {
@@ -312,8 +361,16 @@
                 const bStream = canvas.captureStream(1);
                 const bTrack  = bStream.getVideoTracks()[0];
                 camSender = pc.addTrack(bTrack, bStream);
-            } catch (e) { console.warn('Black video failed:', e); }
+            } catch (e) { console.warn('Black video placeholder failed:', e); }
         }
+
+        // Sync the buttons/status bar in case we had to correct a stale on/off
+        // state above (e.g. a track had actually ended).
+        micBtn.textContent = micOn ? '🔴 Mic On' : '🎤 Mic Off';
+        micBtn.className   = micOn ? 'ctrl-btn mic-on' : 'ctrl-btn off';
+        camBtn.textContent = camOn ? '🟦 Camera On' : '📷 Camera Off';
+        camBtn.className   = camOn ? 'ctrl-btn cam-on' : 'ctrl-btn off';
+        updateStatusBar();
     }
 
     // ── Mic toggle ─────────────────────────────────────────────────────────
