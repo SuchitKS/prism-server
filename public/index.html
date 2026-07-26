@@ -178,6 +178,48 @@
                                                : 'Mic and camera are off';
     }
 
+    // ── Playback overlay: single source of truth ────────────────────────────
+    // The "Tap to play" overlay used to be toggled directly inside the
+    // .play() promise's .then()/.catch() at the two call sites (ontrack and
+    // forcePlay). That was racy: video+audio arrive as two separate ontrack
+    // events for the SAME stream, each calling .play() independently, and
+    // whichever promise settles LAST silently overwrote whatever the other
+    // one had just set — sometimes leaving the overlay stuck visible over a
+    // video that was already playing fine, and sometimes leaving it hidden
+    // over a video that had actually failed to start.
+    //
+    // Fix: overlay visibility is now driven ONLY by the <video> element's own
+    // real, current state — never by a promise result. Any promise outcome
+    // just calls this function afterward; the function itself always looks
+    // at reality (remoteVideo.paused) rather than trusting what a possibly
+    // stale/out-of-order callback thinks happened.
+    function syncPlayOverlay() {
+        const shouldShowOverlay = !!remoteVideo.srcObject && remoteVideo.paused;
+        playOverlay.style.display = shouldShowOverlay ? 'flex' : 'none';
+    }
+
+    // Fires on ANY real transition into playback — whether triggered by our
+    // own .play() call, a browser-internal auto-resume, or anything else.
+    remoteVideo.addEventListener('playing', syncPlayOverlay);
+    // Fires on any real transition into a paused state.
+    remoteVideo.addEventListener('pause', syncPlayOverlay);
+    // Fires when srcObject is cleared/reset (e.g. during cleanupPeerConnection).
+    remoteVideo.addEventListener('emptied', syncPlayOverlay);
+
+    // Shared play attempt used by both the automatic (ontrack) and manual
+    // (tap-to-play) paths. Always logs failures — no more silent catches —
+    // and always re-syncs the overlay from real state afterward, whatever
+    // the outcome.
+    async function attemptPlay(reason) {
+        try {
+            await remoteVideo.play();
+        } catch (e) {
+            console.warn(`Play attempt failed (${reason}):`, e.name, '-', e.message);
+        } finally {
+            syncPlayOverlay();
+        }
+    }
+
     // ── Join ───────────────────────────────────────────────────────────────
     function joinRoom() {
         const room = document.getElementById('roomInput').value.trim();
@@ -209,37 +251,59 @@
     });
 
     // ── Signaling ──────────────────────────────────────────────────────────
-    socket.on('message', async (msg) => {
-        try {
-            if (msg.offer) {
-                // Always create a fresh PeerConnection for each new offer
-                // This handles browser refresh AND host-side restart / Bully
-                // failover re-election cleanly.
-                cleanupPeerConnection();
-                createPeerConnection();
+    // Every signaling message is processed ONE AT A TIME, strictly in
+    // arrival order, by chaining each one onto a single running promise.
+    //
+    // WHY: the old handler was `async (msg) => { ... }` with no guard against
+    // overlapping calls. If a second offer arrived (e.g. two Bully-election
+    // messages firing close together during a fast host failover) while the
+    // FIRST offer's handler was still awaiting setRemoteDescription/
+    // createAnswer, both handlers would be mid-flight at once, reading and
+    // reassigning the shared `pc` variable out from under each other. That
+    // race could leave `remoteVideo` attached to a stream from a PeerConnection
+    // that had already been closed by the other handler — a very plausible
+    // cause of intermittent "sometimes it just doesn't come back" failures
+    // that don't reproduce reliably.
+    //
+    // Chaining removes the possibility of two handlers ever running at the
+    // same time, regardless of how close together messages arrive.
+    let negotiationChain = Promise.resolve();
 
-                setStatus('Connecting...', 'waiting');
-                await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
-                // Re-attach the user's REAL mic/camera tracks if they were already
-                // on before this renegotiation (e.g. a new host was just elected).
-                // Falls back to silent/black placeholders only for whichever is
-                // genuinely off — this removes the old need to manually toggle
-                // mic/cam after a host failover for the track to reappear.
-                await restoreOrPlaceholderTracks();
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                socket.emit('message', { roomId: currentRoom, answer: pc.localDescription });
-
-            } else if (msg.iceCandidate && pc) {
-                await pc.addIceCandidate(new RTCIceCandidate(msg.iceCandidate));
-            } else if (msg.answer && pc) {
-                await pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
-            }
-        } catch (e) {
-            console.error('WebRTC error:', e);
-            setStatus('Error: ' + e.message, 'error');
-        }
+    socket.on('message', (msg) => {
+        negotiationChain = negotiationChain
+            .then(() => handleSignal(msg))
+            .catch((e) => {
+                console.error('WebRTC error:', e);
+                setStatus('Error: ' + e.message, 'error');
+            });
     });
+
+    async function handleSignal(msg) {
+        if (msg.offer) {
+            // Always create a fresh PeerConnection for each new offer.
+            // This handles browser refresh AND host-side restart / Bully
+            // failover re-election cleanly.
+            cleanupPeerConnection();
+            createPeerConnection();
+
+            setStatus('Connecting...', 'waiting');
+            await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
+            // Re-attach the user's REAL mic/camera tracks if they were already
+            // on before this renegotiation (e.g. a new host was just elected).
+            // Falls back to silent/black placeholders only for whichever is
+            // genuinely off — this removes the old need to manually toggle
+            // mic/cam after a host failover for the track to reappear.
+            await restoreOrPlaceholderTracks();
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            socket.emit('message', { roomId: currentRoom, answer: pc.localDescription });
+
+        } else if (msg.iceCandidate && pc) {
+            await pc.addIceCandidate(new RTCIceCandidate(msg.iceCandidate));
+        } else if (msg.answer && pc) {
+            await pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
+        }
+    }
 
     // ── PeerConnection ─────────────────────────────────────────────────────
     function createPeerConnection() {
@@ -267,19 +331,33 @@
             }
         };
 
-        // Receive host video + audio
+        // Receive host video + audio.
+        //
+        // Video and audio arrive as TWO SEPARATE ontrack events for the SAME
+        // underlying stream. The old code called remoteVideo.play() again on
+        // every single firing — i.e. twice per connection — so two play()
+        // promises were in flight at once, racing to set playOverlay's
+        // display style. Whichever one settled last won, regardless of
+        // whether it was actually reporting the current truth. That's the
+        // root cause of the overlay getting stuck visible over video that
+        // was already playing fine underneath it.
+        //
+        // Fix: only (re)attach + attempt play ONCE per distinct stream,
+        // identified by the stream's own id — not once per track.
         pc.ontrack = (e) => {
             console.log('Track from host:', e.track.kind);
-            if (e.streams && e.streams[0]) {
-                remoteVideo.srcObject = e.streams[0];
-                // Attempt autoplay; show tap overlay only if blocked
-                remoteVideo.play().then(() => {
-                    playOverlay.style.display = 'none';
-                }).catch(() => {
-                    // Autoplay blocked — show tap overlay
-                    playOverlay.style.display = 'flex';
-                });
+            if (!e.streams || !e.streams[0]) return;
+
+            const incomingStream = e.streams[0];
+            if (remoteVideo.srcObject && remoteVideo.srcObject.id === incomingStream.id) {
+                // Same stream we already attached (this is the second of the
+                // two ontrack events, for the other track kind) — nothing new
+                // to attach or play.
+                return;
             }
+
+            remoteVideo.srcObject = incomingStream;
+            attemptPlay('ontrack');
         };
     }
 
@@ -289,13 +367,16 @@
         pc = null;
         micSender = null;
         camSender = null;
+        // Drop the old stream explicitly rather than leaving a frozen frame
+        // from a now-dead connection sitting behind a possibly-stale overlay
+        // state. Fires the 'emptied' event, which re-syncs the overlay to
+        // "hidden" (nothing to play yet) until the next real stream attaches.
+        remoteVideo.srcObject = null;
     }
 
     function forcePlay() {
         remoteVideo.muted = false;
-        remoteVideo.play().then(() => {
-            playOverlay.style.display = 'none';
-        }).catch(e => console.warn('Play failed:', e));
+        attemptPlay('manual tap');
     }
 
     // Called once per fresh PeerConnection, right before createAnswer().
